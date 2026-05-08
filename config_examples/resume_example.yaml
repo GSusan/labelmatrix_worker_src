@@ -1,0 +1,47 @@
+# LabelMatrix Training Configuration Example
+# 用于YOLO目标检测训练的配置文件示例
+
+# 任务基本信息
+task_id: "yolo_train_building_uav"
+task_type: "segment"        # detect, segment, classify, obb
+mode: "resume"              # train, predict, resume
+
+# 模型配置
+model_architecture: "yolo26x-seg.pt"  # 预训练模型路径
+
+# 数据集配置
+data_config: "D:/DLProjects/Dataset/uav_building_is_all/data.yaml"  # Ultralytics格式的数据集配置
+
+# 输出目录
+output_dir: "D:/DLProjects/ultralytics/labelmatrix/work_dirs"
+
+# 训练超参数
+hyperparameters:
+  epochs: 300
+  batch: 24
+  imgsz: 512
+  lr0: 0.001
+  lrf: 0.01
+  weight_decay: 0.0005
+  optimizer: "AdamW"       # SGD, Adam, AdamW, Adamax
+  amp: false                # 自动混合精度训练
+  cos_lr: true
+  clip_grad: 0.1
+  close_mosaic: 30
+
+# 硬件配置
+hardware:
+  device: "cuda:0"         # cpu, cuda:0, cuda:1, etc.
+  workers: 0
+  min_memory_mb: 8000      # 最小GPU显存要求(MB)
+
+# 推理配置（当mode=predict时使用）
+# predict:
+#   source: "./test_images"
+#   conf_thres: 0.25
+#   iou_thres: 0.45
+#   augment: false
+#   half: false
+
+# 恢复训练配置（当mode=resume时使用）
+# resume_from: "./output/yolo_train_001/train/weights/last.pt"

@@ -1,0 +1,76 @@
+# LabelMatrix 推理任务配置示例
+# 遥感影像大幅面目标检测/分割推理
+
+# ============================================================
+# 任务基本配置
+# ============================================================
+task_id: "predict_farmland_20260312"     # 任务唯一标识
+task_type: "segment"                      # 任务类型: detect, segment, obb, classify
+mode: "predict"                          # 运行模式: predict (推理), train (训练), resume (继续训练)
+
+# ============================================================
+# 模型配置
+# ============================================================
+model_path: "D:/DLProjects/ultralytics/labelmatrix/work_dirs/yolo_train_farmland_003/train/weights/best.pt"
+# model_architecture 仅在需要创建新模型时使用，推理时使用 model_path 即可
+model_architecture: "yolov8n.pt"
+
+# ============================================================
+# 输出配置
+# ============================================================
+output_dir: "D:/DataSets/SatDatasets/lh_farmland/Shapefile/inference"
+
+# ============================================================
+# 推理配置
+# ============================================================
+predict:
+  # 是否使用大幅面遥感预测器（分块处理）
+  # 设置为 true 时会启用分块预测，适用于大幅面遥感影像
+  # 设置为 false 时使用标准的 UltralyticsEngine
+  use_rs_predictor: true
+
+  # 输入图像路径（支持单文件或目录）
+  source: "D:/DataSets/SatDatasets/lh_farmland/Shapefile/test1_05.tif"
+
+  # 结果保存目录（可选，默认使用 output_dir）
+  save_dir: "D:/DataSets/SatDatasets/lh_farmland/Shapefile/inference"
+
+  # 推理参数
+  conf_thres: 0.25                        # 置信度阈值 (0-1)
+  iou_thres: 0.45                         # NMS IoU阈值 (0-1)
+
+  # 大幅面遥感影像分块配置（仅在 use_rs_predictor: true 时生效）
+  tile_size: 512                          # 分块大小（像素）
+  tile_overlap: 0.1                       # 分块重叠比例 (0-1)
+
+  # 结果合并参数（处理重叠部分的关键参数）
+  merge_iou_threshold: 0.5                # 跨分块检测框合并IoU阈值（高阈值直接合并）
+  segment_high_threshold: 0.7             # 分割高IoU阈值（>0.7直接合并）
+  segment_low_threshold: 0.3              # 分割低IoU阈值（0.3-0.7检查连通性后决定）
+
+  # 输出选项
+  save_format: "geojson"                  # 输出格式: geojson, json
+  save_tiles: false                       # 是否保存分块可视化结果（调试用）
+  save_pixel_results: false                # 是否保存第一步像素坐标结果（调试用）
+  save_visualization: false                # 是否保存可视化成果（叠加检测结果的影像）
+  file_naming: "default"                  # 文件命名策略: default, timestamp
+
+  # 可视化选项
+  show_conf: true                         # 显示置信度
+  show_labels: true                       # 显示标签
+  line_width: 3                           # 边界框线宽（可视化图）
+  vis_conf_threshold: 0.3                 # 可视化置信度阈值（低于此值的检测结果不显示）
+  vis_format: "jpg"                       # 可视化输出格式: jpg, png, tif
+
+# ============================================================
+# 超参数配置（可选）
+# ============================================================
+hyperparameters:
+  imgsz: 512                              # 推理图像尺寸
+
+# ============================================================
+# 硬件配置
+# ============================================================
+hardware:
+  device: "cuda:0"                        # 设备: cuda:0, cuda:1, cpu
+  workers: 0                              # 数据加载线程数
