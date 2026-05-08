@@ -117,3 +117,58 @@ class BaseTaskConverter(ABC):
             needs_conversion = True
 
         return class_id - 1 if needs_conversion and class_id > 0 else class_id
+
+
+class SegmentConverter(BaseTaskConverter):
+    """分割任务转换器"""
+
+    def convert_feature(
+        self,
+        feature: dict,
+        img_width: int,
+        img_height: int
+    ) -> Optional[str]:
+        """
+        转换分割任务的feature
+
+        Args:
+            feature: GeoJSON feature对象
+            img_width: 图像宽度
+            img_height: 图像高度
+
+        Returns:
+            Optional[str]: YOLO分割格式的标注行
+        """
+        props = feature.get('properties', {})
+        class_id = props.get('class_id')
+        geometry = feature.get('geometry', {})
+
+        if class_id is None:
+            if self.verbose_logging:
+                logger.debug("Feature missing class_id")
+            return None
+
+        if geometry.get('type') != 'Polygon':
+            if self.verbose_logging:
+                logger.debug(f"Invalid geometry type: {geometry.get('type')}")
+            return None
+
+        coordinates = geometry.get('coordinates', [])
+        if not coordinates:
+            if self.verbose_logging:
+                logger.debug("Empty coordinates")
+            return None
+
+        # 转换多边形坐标
+        normalized_coords = self.normalize_coordinates(
+            coordinates[0], img_width, img_height
+        )
+
+        # 转换class_id
+        yolo_class_id = self.get_yolo_class_id(class_id)
+
+        # YOLO格式: class_id x1 y1 x2 y2 ... xn yn
+        line = f"{yolo_class_id} " + " ".join(
+            f"{x:.6f} {y:.6f}" for x, y in normalized_coords
+        )
+        return line
