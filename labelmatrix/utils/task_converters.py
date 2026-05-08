@@ -309,3 +309,80 @@ class DetectConverter(BaseTaskConverter):
         if self.verbose_logging:
             logger.warning(f"Cannot extract bbox from geometry type: {geom_type}")
         return None
+
+
+class OBBConverter(BaseTaskConverter):
+    """旋转框检测转换器"""
+
+    def convert_feature(
+        self,
+        feature: dict,
+        img_width: int,
+        img_height: int
+    ) -> Optional[str]:
+        """
+        转换旋转框检测任务的feature
+
+        Args:
+            feature: GeoJSON feature对象
+            img_width: 图像宽度
+            img_height: 图像高度
+
+        Returns:
+            Optional[str]: YOLO OBB格式的标注行 (class_id x1 y1 x2 y2 x3 y3 x4 y4)
+        """
+        props = feature.get('properties', {})
+        class_id = props.get('class_id')
+        geometry = feature.get('geometry', {})
+
+        if class_id is None:
+            if self.verbose_logging:
+                logger.debug("Feature missing class_id")
+            return None
+
+        if geometry.get('type') != 'Polygon':
+            if self.verbose_logging:
+                logger.debug(f"OBB requires Polygon geometry, got {geometry.get('type')}")
+            return None
+
+        coordinates = geometry.get('coordinates', [])
+        if not coordinates:
+            if self.verbose_logging:
+                logger.debug("Empty coordinates")
+            return None
+
+        polygon_coords = coordinates[0]
+
+        # 验证是否为4个角点
+        if not self._validate_four_corners(polygon_coords):
+            if self.verbose_logging:
+                logger.warning(
+                    f"OBB requires exactly 4 corner points, got {len(polygon_coords)}"
+                )
+            return None
+
+        # 归一化四个角点
+        normalized_coords = self.normalize_coordinates(
+            polygon_coords, img_width, img_height
+        )
+
+        # 转换class_id
+        yolo_class_id = self.get_yolo_class_id(class_id)
+
+        # YOLO OBB格式: class_id x1 y1 x2 y2 x3 y3 x4 y4
+        line = f"{yolo_class_id} " + " ".join(
+            f"{x:.6f} {y:.6f}" for x, y in normalized_coords
+        )
+        return line
+
+    def _validate_four_corners(self, coordinates: List[List[float]]) -> bool:
+        """
+        验证是否为4个角点
+
+        Args:
+            coordinates: 坐标列表
+
+        Returns:
+            bool: 是否为4个角点
+        """
+        return len(coordinates) == 4
