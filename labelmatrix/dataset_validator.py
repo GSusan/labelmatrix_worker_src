@@ -17,7 +17,8 @@ class DatasetValidator:
         self,
         data_config_path: str,
         train_val_split: float = 0.8,
-        random_seed: int = 42
+        random_seed: int = 42,
+        verbose_logging: bool = False
     ):
         """
         初始化验证器
@@ -26,11 +27,13 @@ class DatasetValidator:
             data_config_path: 数据集配置文件路径 (data.yaml)
             train_val_split: 训练集比例，默认0.8（80%训练，20%验证）
             random_seed: 随机种子，默认42
+            verbose_logging: 是否使用详细日志模式，默认False
         """
         self.data_config_path = Path(data_config_path)
         self.dataset_root = self.data_config_path.parent
         self.train_val_split = train_val_split
         self.random_seed = random_seed
+        self.verbose_logging = verbose_logging
 
     def validate(self) -> bool:
         """
@@ -72,5 +75,6 @@ class DatasetValidator:
         return GeoJSONToYOLOConverter(
             str(self.dataset_root),
             train_val_split=self.train_val_split,
-            random_seed=self.random_seed
+            random_seed=self.random_seed,
+            verbose_logging=self.verbose_logging
         )
