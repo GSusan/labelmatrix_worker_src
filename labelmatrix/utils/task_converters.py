@@ -172,3 +172,140 @@ class SegmentConverter(BaseTaskConverter):
             f"{x:.6f} {y:.6f}" for x, y in normalized_coords
         )
         return line
+
+
+class DetectConverter(BaseTaskConverter):
+    """检测任务转换器 - 水平边界框"""
+
+    def convert_feature(
+        self,
+        feature: dict,
+        img_width: int,
+        img_height: int
+    ) -> Optional[str]:
+        """
+        转换检测任务的feature
+
+        Args:
+            feature: GeoJSON feature对象
+            img_width: 图像宽度
+            img_height: 图像高度
+
+        Returns:
+            Optional[str]: YOLO检测格式的标注行 (class_id x_center y_center width height)
+        """
+        props = feature.get('properties', {})
+        class_id = props.get('class_id')
+        geometry = feature.get('geometry', {})
+
+        if class_id is None:
+            if self.verbose_logging:
+                logger.debug("Feature missing class_id")
+            return None
+
+        if geometry.get('type') != 'Polygon':
+            # 尝试从其他几何类型提取边界框
+            if self.verbose_logging:
+                logger.debug(f"Attempting to extract bbox from {geometry.get('type')}")
+            return self._try_extract_bbox(feature, img_width, img_height, class_id)
+
+        coordinates = geometry.get('coordinates', [])
+        if not coordinates:
+            if self.verbose_logging:
+                logger.debug("Empty coordinates")
+            return None
+
+        # 提取外接矩形（AABB）
+        polygon_coords = coordinates[0]
+        x_center, y_center, width, height = self._calculate_aabb(
+            polygon_coords, img_width, img_height
+        )
+
+        # 转换class_id
+        yolo_class_id = self.get_yolo_class_id(class_id)
+
+        # YOLO检测格式: class_id x_center y_center width height
+        return f"{yolo_class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
+
+    def _calculate_aabb(
+        self,
+        coordinates: List[List[float]],
+        img_width: int,
+        img_height: int
+    ) -> Tuple[float, float, float, float]:
+        """
+        计算轴对齐边界框
+
+        Args:
+            coordinates: 多边形坐标列表
+            img_width: 图像宽度
+            img_height: 图像高度
+
+        Returns:
+            Tuple[float, float, float, float]: (x_center, y_center, width, height) 归一化后的值
+        """
+        # 提取所有x和y坐标
+        x_coords = [coord[0] for coord in coordinates]
+        y_coords = [coord[1] for coord in coordinates]
+
+        # 计算边界
+        min_x = min(x_coords)
+        max_x = max(x_coords)
+        min_y = min(y_coords)
+        max_y = max(y_coords)
+
+        # 归一化并计算中心点和尺寸
+        x_center = ((min_x + max_x) / 2) / img_width
+        y_center = ((min_y + max_y) / 2) / img_height
+        width = (max_x - min_x) / img_width
+        height = (max_y - min_y) / img_height
+
+        return x_center, y_center, width, height
+
+    def _try_extract_bbox(
+        self,
+        feature: dict,
+        img_width: int,
+        img_height: int,
+        class_id: int
+    ) -> Optional[str]:
+        """
+        尝试从非Polygon几何类型提取边界框
+
+        Args:
+            feature: GeoJSON feature对象
+            img_width: 图像宽度
+            img_height: 图像高度
+            class_id: 类别ID
+
+        Returns:
+            Optional[str]: YOLO检测格式的标注行
+        """
+        geometry = feature.get('geometry', {})
+        geom_type = geometry.get('type')
+
+        # 对于Point，创建一个小的边界框
+        if geom_type == 'Point':
+            coords = geometry.get('coordinates', [])
+            if coords:
+                x, y = coords[0], coords[1]
+                # 创建1%图像大小的边界框
+                box_size = 0.01
+                x_norm = x / img_width
+                y_norm = y / img_height
+                yolo_class_id = self.get_yolo_class_id(class_id)
+                return f"{yolo_class_id} {x_norm:.6f} {y_norm:.6f} {box_size:.6f} {box_size:.6f}"
+
+        # 对于LineString，使用其端点计算边界框
+        elif geom_type == 'LineString':
+            coords = geometry.get('coordinates', [])
+            if len(coords) >= 2:
+                x_center, y_center, width, height = self._calculate_aabb(
+                    coords, img_width, img_height
+                )
+                yolo_class_id = self.get_yolo_class_id(class_id)
+                return f"{yolo_class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
+
+        if self.verbose_logging:
+            logger.warning(f"Cannot extract bbox from geometry type: {geom_type}")
+        return None
