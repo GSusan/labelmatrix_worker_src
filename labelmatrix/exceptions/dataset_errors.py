@@ -24,3 +24,13 @@ class GeoJSONFormatError(DatasetConversionError):
 class MissingCategoriesError(DatasetConversionError):
     """缺少类别信息异常"""
     pass
+
+
+class UnsupportedTaskError(DatasetConversionError):
+    """不支持的task类型异常"""
+    pass
+
+
+class InvalidGeometryError(GeoJSONFormatError):
+    """几何形状无效异常"""
+    pass
