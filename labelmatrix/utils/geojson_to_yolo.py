@@ -31,7 +31,8 @@ class GeoJSONToYOLOConverter:
         self,
         source_dataset_path: str,
         train_val_split: float = 0.8,
-        random_seed: int = 42
+        random_seed: int = 42,
+        verbose_logging: bool = False
     ):
         """
         初始化转换器
@@ -40,6 +41,7 @@ class GeoJSONToYOLOConverter:
             source_dataset_path: 源数据集根目录路径
             train_val_split: 训练集比例，默认0.8（80%训练，20%验证）
             random_seed: 随机种子，用于保证划分可复现，默认42
+            verbose_logging: 是否使用详细日志模式，默认False
         """
         self.source_path = Path(source_dataset_path)
         self.source_config = self.source_path / 'data.yaml'
@@ -50,6 +52,12 @@ class GeoJSONToYOLOConverter:
         # 读取源配置获取类别信息
         self.categories = self._load_categories()
 
+        # 读取task类型
+        self.task = self._load_task()
+
+        # 创建对应任务的转换器
+        self.task_converter = self._create_task_converter()
+
         # 输出目录 - 在源数据集目录内部创建yolo_format
         # 例如: D:\DLProjects\Dataset\sat_farmland_test_20260415\yolo_format\
         self.output_path = self.source_path / 'yolo_format'
@@ -57,6 +65,7 @@ class GeoJSONToYOLOConverter:
         # 训练/验证集划分配置
         self.train_val_split = train_val_split
         self.random_seed = random_seed
+        self.verbose_logging = verbose_logging
 
         # 文件划分结果
         self._train_files: List[str] = []
@@ -108,6 +117,57 @@ class GeoJSONToYOLOConverter:
 
         logger.info(f"Loaded {len(categories)} categories: {categories}")
         return categories
+
+    def _load_task(self) -> str:
+        """
+        从data.yaml加载task类型
+
+        Returns:
+            str: task类型 (segment/detect/obb)
+
+        Raises:
+            UnsupportedTaskError: 当task类型不支持时
+        """
+        from labelmatrix.exceptions.dataset_errors import UnsupportedTaskError
+
+        task = self._source_config_data.get('task', 'segment')
+
+        # 验证task类型
+        valid_tasks = {'segment', 'detect', 'obb'}
+        if task not in valid_tasks:
+            raise UnsupportedTaskError(
+                f"Unsupported task type: '{task}'. "
+                f"Valid tasks are: {', '.join(valid_tasks)}"
+            )
+
+        logger.info(f"Task type: {task}")
+        return task
+
+    def _create_task_converter(self) -> 'BaseTaskConverter':
+        """
+        根据task类型创建对应的转换器
+
+        Returns:
+            BaseTaskConverter: 任务转换器实例
+        """
+        from labelmatrix.utils.task_converters import (
+            SegmentConverter,
+            DetectConverter,
+            OBBConverter
+        )
+
+        converter_map = {
+            'segment': SegmentConverter,
+            'detect': DetectConverter,
+            'obb': OBBConverter
+        }
+
+        converter_class = converter_map.get(self.task, SegmentConverter)
+        return converter_class(
+            self.categories,
+            self._source_config_data,
+            verbose_logging=self.verbose_logging
+        )
 
     def convert(self) -> str:
         """
@@ -419,50 +479,24 @@ class GeoJSONToYOLOConverter:
         if image_ref.endswith('.tif'):
             image_ref = image_ref[:-4] + '.jpg'
 
-        # 生成YOLO标注内容
+        # 生成YOLO标注内容（使用task_converter）
         yolo_annotations = []
+        skipped_count = 0
 
         for feature in features:
-            props = feature.get('properties', {})
-            class_id = props.get('class_id')
-            geometry = feature.get('geometry', {})
+            try:
+                line = self.task_converter.convert_feature(feature, img_width, img_height)
+                if line:
+                    yolo_annotations.append(line)
+                else:
+                    skipped_count += 1
+            except Exception as e:
+                if self.verbose_logging:
+                    logger.warning(f"Failed to convert feature in {geojson_file.name}: {e}")
+                skipped_count += 1
 
-            if class_id is None:
-                continue
-
-            if geometry.get('type') != 'Polygon':
-                continue
-
-            coordinates = geometry.get('coordinates', [])
-            if not coordinates:
-                continue
-
-            # 转换多边形坐标
-            normalized_coords = self._normalize_polygon(
-                coordinates[0], img_width, img_height
-            )
-
-            # 检查是否需要转换class_id
-            # GeoJSON中的class_id通常从1开始，需要转换为从0开始
-            names = self._source_config_data.get('names')
-            needs_conversion = False
-
-            if isinstance(names, dict):
-                # 字典格式：检查最小key
-                keys = [int(k) for k in names.keys()]
-                if keys and min(keys) == 1:
-                    needs_conversion = True
-            elif isinstance(names, list):
-                # 列表格式：通常GeoJSON的class_id从1开始，对应列表索引
-                # 例如：class_id=1 → names[0], class_id=2 → names[1]
-                needs_conversion = True
-
-            # 如果需要转换，将class_id减1
-            yolo_class_id = class_id - 1 if needs_conversion and class_id > 0 else class_id
-
-            # YOLO格式: class_id x1 y1 x2 y2 ... xn yn
-            line = f"{yolo_class_id} " + " ".join(f"{x:.6f} {y:.6f}" for x, y in normalized_coords)
-            yolo_annotations.append(line)
+        if skipped_count > 0 and self.verbose_logging:
+            logger.debug(f"Skipped {skipped_count} features in {geojson_file.name}")
 
         # 根据split选择输出目录
         split_dir = 'train2017' if split == 'train' else 'val2017'
