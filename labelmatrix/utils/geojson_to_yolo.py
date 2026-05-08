@@ -46,6 +46,11 @@ class GeoJSONToYOLOConverter:
         self.source_path = Path(source_dataset_path)
         self.source_config = self.source_path / 'data.yaml'
 
+        # 训练/验证集划分配置（需要在_load_categories之前设置）
+        self.train_val_split = train_val_split
+        self.random_seed = random_seed
+        self.verbose_logging = verbose_logging
+
         # 保存原始配置信息（需要在_load_categories之前初始化）
         self._source_config_data: Dict[str, Any] = {}
 
@@ -61,11 +66,6 @@ class GeoJSONToYOLOConverter:
         # 输出目录 - 在源数据集目录内部创建yolo_format
         # 例如: D:\DLProjects\Dataset\sat_farmland_test_20260415\yolo_format\
         self.output_path = self.source_path / 'yolo_format'
-
-        # 训练/验证集划分配置
-        self.train_val_split = train_val_split
-        self.random_seed = random_seed
-        self.verbose_logging = verbose_logging
 
         # 文件划分结果
         self._train_files: List[str] = []
