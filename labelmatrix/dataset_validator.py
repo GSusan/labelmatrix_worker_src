@@ -47,7 +47,7 @@ class DatasetValidator:
             logger.warning(f"data.yaml not found: {self.data_config_path}")
             return False
 
-        # 检查必需目录
+        # 检查必需目录（YOLO格式要求）
         required_dirs = ['labels', 'labels/train2017', 'labels/val2017', 'images']
         for dir_path in required_dirs:
             full_path = self.dataset_root / dir_path

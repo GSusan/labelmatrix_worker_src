@@ -43,7 +43,8 @@ class GeoJSONToYOLOConverter:
             random_seed: 随机种子，用于保证划分可复现，默认42
             verbose_logging: 是否使用详细日志模式，默认False
         """
-        self.source_path = Path(source_dataset_path)
+        # 使用绝对路径，避免相对路径被解析为当前工作目录
+        self.source_path = Path(source_dataset_path).resolve().absolute()
         self.source_config = self.source_path / 'data.yaml'
 
         # 训练/验证集划分配置（需要在_load_categories之前设置）
