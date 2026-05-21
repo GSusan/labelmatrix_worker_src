@@ -2,33 +2,28 @@
 # 用于YOLO目标检测训练的配置文件示例
 
 # 任务基本信息
-task_id: "test_test"
-task_type: "segment"        # detect, segment, classify, obb
+task_id: "yolo_train_detect_test"
+task_type: "detect"        # detect, segment, classify, obb
 mode: "train"              # train, predict, resume
 
 # 模型配置
-model_architecture: "yolo26x-seg.pt"  # 预训练模型路径   yolo26x-seg.pt
+model_architecture: "yolo26x.pt"  # 预训练模型路径   yolo26x-seg.pt
 
 # 数据集配置
-data_config: "D:/DLProjects/Dataset/test/data.yaml"  # Ultralytics格式的数据集配置
+data_config: "D:/DLProjects/Dataset/test_ob/data.yaml"  # Ultralytics格式的数据集配置
 
 # 输出目录
 output_dir: "D:/DLProjects/ultralytics/labelmatrix/work_dirs"
 
 # 训练超参数
 hyperparameters:
-  epochs: 50
+  epochs: 300
   batch: 4
   imgsz: 512
   lr0: 0.001
-  momentum: 0.937      # [0.8, 0.98]
-  warmup_epochs: 3.0   # [1.0, 10.0]
-  cos_lr: False        # [True, False]
   weight_decay: 0.0005
   optimizer: "AdamW"       # SGD, Adam, AdamW, Adamax
   amp: false                # 自动混合精度训练
-  save_period: -1       # 每N个epochs保存
-  seed: 0
 
 # 硬件配置
 hardware:

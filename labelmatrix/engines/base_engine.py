@@ -24,6 +24,9 @@ class TrainResult:
     last_model_path: Optional[Path]
     metrics: Dict[str, float]
     error: Optional[str] = None
+    test_metrics: Optional[Dict[str, float]] = None
+    test_evaluated: bool = False
+    test_skipped_reason: Optional[str] = None
 
 
 @dataclass

@@ -8,7 +8,7 @@ LabelMatrix Trainer - 集成Ultralytics YOLO的训练引擎
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 try:
     from ultralytics import YOLO
@@ -146,16 +146,42 @@ class LabelMatrixTrainer(BaseEngine):
             # 提取最终指标
             metrics = self._extract_final_metrics()
 
+            # 自动test评估（三层安全检查）
+            test_metrics = None
+            test_evaluated = False
+            test_skipped_reason = None
+
+            should_run, skip_reason = self._should_run_test_evaluation()
+            if should_run and best_model.exists():
+                logger.info("Test set available, running automatic test evaluation...")
+                test_metrics = self._run_test_evaluation(best_model)
+                test_evaluated = test_metrics is not None
+                if not test_evaluated:
+                    test_skipped_reason = "test evaluation execution failed"
+                    logger.warning(f"Test evaluation failed, skipping: {test_skipped_reason}")
+            else:
+                test_evaluated = False
+                test_skipped_reason = skip_reason
+                if skip_reason:
+                    logger.info(f"Test evaluation skipped: {skip_reason}")
+
             self._update_status('completed', progress=100, metrics=metrics)
             self._persist_state()
 
             logger.info("Training completed successfully")
+            if test_evaluated:
+                logger.info(f"Test evaluation completed successfully: {test_metrics}")
+            elif test_skipped_reason:
+                logger.info(f"Test evaluation skipped: {test_skipped_reason}")
 
             return TrainResult(
                 success=True,
                 best_model_path=best_model if best_model.exists() else None,
                 last_model_path=last_model if last_model.exists() else None,
-                metrics=metrics
+                metrics=metrics,
+                test_metrics=test_metrics,
+                test_evaluated=test_evaluated,
+                test_skipped_reason=test_skipped_reason
             )
 
         except Exception as e:
@@ -268,16 +294,42 @@ class LabelMatrixTrainer(BaseEngine):
 
             metrics = self._extract_final_metrics()
 
+            # 自动test评估（三层安全检查）
+            test_metrics = None
+            test_evaluated = False
+            test_skipped_reason = None
+
+            should_run, skip_reason = self._should_run_test_evaluation()
+            if should_run and best_model.exists():
+                logger.info("Test set available, running automatic test evaluation...")
+                test_metrics = self._run_test_evaluation(best_model)
+                test_evaluated = test_metrics is not None
+                if not test_evaluated:
+                    test_skipped_reason = "test evaluation execution failed"
+                    logger.warning(f"Test evaluation failed, skipping: {test_skipped_reason}")
+            else:
+                test_evaluated = False
+                test_skipped_reason = skip_reason
+                if skip_reason:
+                    logger.info(f"Test evaluation skipped: {skip_reason}")
+
             self._update_status('completed', progress=100, metrics=metrics)
             self._persist_state()
 
             logger.info("Resumed training completed successfully")
+            if test_evaluated:
+                logger.info(f"Test evaluation completed successfully: {test_metrics}")
+            elif test_skipped_reason:
+                logger.info(f"Test evaluation skipped: {test_skipped_reason}")
 
             return TrainResult(
                 success=True,
                 best_model_path=best_model if best_model.exists() else None,
                 last_model_path=last_model if last_model.exists() else None,
-                metrics=metrics
+                metrics=metrics,
+                test_metrics=test_metrics,
+                test_evaluated=test_evaluated,
+                test_skipped_reason=test_skipped_reason
             )
 
         except Exception as e:
@@ -389,7 +441,10 @@ class LabelMatrixTrainer(BaseEngine):
             'current_epoch': display_epoch,
             'total_epochs': self._total_epochs,
             'resources': self._resources,
-            'lr': self._learning_rate
+            'lr': self._learning_rate,
+            # 添加test评估相关状态
+            'test_evaluated': False,
+            'test_skipped_reason': None
         })
         return state
 
@@ -642,3 +697,122 @@ class LabelMatrixTrainer(BaseEngine):
             result_files.append(predict_dir)
 
         return result_files
+
+    # ==================== Test集自动评估 ====================
+
+    def _should_run_test_evaluation(self) -> Tuple[bool, Optional[str]]:
+        """
+        三层安全检查：判断是否应该运行test集评估
+
+        Returns:
+            (should_run, skip_reason): 是否应该运行，如果不应运行则返回原因
+        """
+        try:
+            # 第一层：配置层检查
+            data_config_path = self.config.get('data_config', '')
+            if not data_config_path:
+                return False, "data_config not specified"
+
+            # 读取数据集配置文件
+            from pathlib import Path
+            import yaml
+
+            data_yaml_path = Path(data_config_path)
+            if not data_yaml_path.exists():
+                return False, f"data config file not found: {data_config_path}"
+
+            with open(data_yaml_path, 'r', encoding='utf-8') as f:
+                data_config = yaml.safe_load(f)
+
+            # 检查是否有test字段
+            if 'test' not in data_config or not data_config['test']:
+                return False, "test field not configured in data.yaml"
+
+            # 第二层：路径层检查
+            test_path = data_config['test']
+            dataset_root = Path(data_config.get('path', data_yaml_path.parent))
+            full_test_path = dataset_root / test_path
+
+            if not full_test_path.exists():
+                return False, f"test path does not exist: {full_test_path}"
+
+            # 第三层：内容层检查
+            # 检查是否有图像文件
+            image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
+            image_files = list(full_test_path.glob('*.jpg')) + \
+                          list(full_test_path.glob('*.jpeg')) + \
+                          list(full_test_path.glob('*.png')) + \
+                          list(full_test_path.glob('*.bmp')) + \
+                          list(full_test_path.glob('*.webp'))
+
+            if not image_files:
+                return False, f"no image files found in test path: {full_test_path}"
+
+            # 检查是否有对应的标注文件
+            labels_path = full_test_path.parent / f"{full_test_path.name}_labels"
+            labels_exist = False
+            if labels_path.exists():
+                label_files = list(labels_path.glob('*.txt'))
+                if label_files:
+                    labels_exist = True
+            else:
+                # 检查同目录下是否有txt标注文件
+                label_files = list(full_test_path.glob('*.txt'))
+                if label_files:
+                    labels_exist = True
+
+            if not labels_exist:
+                return False, f"no label files found for test set"
+
+            # 所有检查通过
+            return True, None
+
+        except Exception as e:
+            logger.warning(f"Error during test evaluation check: {e}")
+            return False, f"error checking test availability: {str(e)}"
+
+    def _run_test_evaluation(self, model_path: Path) -> Optional[Dict[str, float]]:
+        """
+        执行test集评估
+
+        Args:
+            model_path: 训练好的模型路径
+
+        Returns:
+            test评估指标，如果评估失败则返回None
+        """
+        try:
+            if not self.model:
+                logger.warning("Model not loaded, cannot run test evaluation")
+                return None
+
+            logger.info(f"Starting test evaluation with model: {model_path}")
+
+            # 执行test集验证
+            test_results = self.model.val(
+                split='test',
+                data=self.config['data_config'],
+                batch=self.config.get('hyperparameters', {}).get('batch', 16),
+                project=str(self.output_dir),
+                name='test_evaluation',
+                save_json=False,
+                plots=True,
+                verbose=True
+            )
+
+            # 提取test指标
+            test_metrics = {}
+            if hasattr(test_results, 'box'):
+                test_metrics['mAP50'] = float(test_results.box.map50)
+                test_metrics['mAP50-95'] = float(test_results.box.map)
+                if hasattr(test_results.box, 'mp'):
+                    test_metrics['precision'] = float(test_results.box.mp)
+                if hasattr(test_results.box, 'mr'):
+                    test_metrics['recall'] = float(test_results.box.mr)
+
+            logger.info(f"Test evaluation completed: {test_metrics}")
+            return test_metrics
+
+        except Exception as e:
+            logger.error(f"Test evaluation failed: {e}")
+            return None

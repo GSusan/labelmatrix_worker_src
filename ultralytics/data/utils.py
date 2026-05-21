@@ -474,6 +474,25 @@ def check_det_dataset(dataset: str, autodownload: bool = True) -> dict[str, Any]
             LOGGER.info(f"Dataset download {s}\n")
     check_font("Arial.ttf" if is_ascii(data["names"]) else "Arial.Unicode.ttf")  # download fonts
 
+    # Test字段验证（用于训练后自动test评估）
+    if "test" in data and data["test"]:
+        test_path = Path(data["test"])
+        if not test_path.exists():
+            LOGGER.warning(f"Test path specified but does not exist: {test_path}")
+            # 保留配置，让后续处理决定是否报错
+        else:
+            # 检查test路径中是否有图像文件
+            image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
+            test_images = []
+            for ext in image_extensions:
+                test_images.extend(test_path.glob(f"*{ext}"))
+                test_images.extend(test_path.glob(f"*{ext.upper()}"))
+
+            if not test_images:
+                LOGGER.warning(f"Test path exists but contains no valid images: {test_path}")
+            else:
+                LOGGER.info(f"Test set found with {len(test_images)} images: {test_path}")
+
     return data  # dictionary
 
 
