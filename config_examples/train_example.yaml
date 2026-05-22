@@ -10,7 +10,7 @@ mode: "train"              # train, predict, resume
 model_architecture: "yolo26x-seg.pt"  # 预训练模型路径   yolo26x-seg.pt
 
 # 数据集配置
-data_config: "D:/DLProjects/Dataset/test/data.yaml"  # Ultralytics格式的数据集配置
+data_config: "D:/DLProjects/Dataset/test/test/data.yaml"  # Ultralytics格式的数据集配置
 
 # 输出目录
 output_dir: "D:/DLProjects/ultralytics/labelmatrix/work_dirs"

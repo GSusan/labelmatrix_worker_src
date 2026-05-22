@@ -71,6 +71,10 @@ class GeoJSONToYOLOConverter:
         # 文件划分结果
         self._train_files: List[str] = []
         self._val_files: List[str] = []
+        self._test_files: List[str] = []
+
+        # 检测test数据集
+        self._has_test_dataset = self._detect_test_dataset()
 
     def _load_categories(self) -> Dict[int, str]:
         """
@@ -144,6 +148,38 @@ class GeoJSONToYOLOConverter:
         logger.info(f"Task type: {task}")
         return task
 
+    def _detect_test_dataset(self) -> bool:
+        """
+        检测Test目录是否存在且有效
+
+        Returns:
+            bool: Test数据集是否可用
+        """
+        test_dir = self.source_path / 'Test'
+
+        if not test_dir.exists():
+            logger.debug("Test directory not found")
+            return False
+
+        # 检查必要的子目录
+        test_images = test_dir / 'images'
+        test_geojsons = test_dir / 'geojsons'
+
+        if not test_images.exists() or not test_geojsons.exists():
+            logger.warning("Test directory exists but missing required subdirectories (images or geojsons)")
+            return False
+
+        # 收集所有geojson文件名
+        geojson_files = list(test_geojsons.glob('*.geojson'))
+
+        if not geojson_files:
+            logger.info("Test directory exists but contains no geojson files")
+            return False
+
+        self._test_files = [f.stem for f in geojson_files]
+        logger.info(f"Found test dataset: {len(self._test_files)} files")
+        return True
+
     def _create_task_converter(self) -> 'BaseTaskConverter':
         """
         根据task类型创建对应的转换器
@@ -187,16 +223,20 @@ class GeoJSONToYOLOConverter:
         self._split_files()
 
         # 复制图像文件
-        train_count, val_count = self._copy_images()
+        train_count, val_count, test_count = self._copy_images()
 
         # 转换标注文件
-        train_labels, val_labels = self._convert_labels()
+        train_labels, val_labels, test_labels = self._convert_labels()
 
         # 生成新的data.yaml
         new_config_path = self._generate_data_yaml()
 
         logger.info(f"Conversion completed: {train_count} train images, {val_count} val images")
+        if self._has_test_dataset:
+            logger.info(f"Test images: {test_count}")
         logger.info(f"Labels: {train_labels} train, {val_labels} val")
+        if self._has_test_dataset:
+            logger.info(f"Test labels: {test_labels}")
         logger.info(f"New dataset: {new_config_path}")
 
         # 返回绝对路径，确保训练时能正确找到数据集
@@ -210,6 +250,13 @@ class GeoJSONToYOLOConverter:
             self.output_path / 'labels' / 'train2017',
             self.output_path / 'labels' / 'val2017',
         ]
+
+        # 如果有test数据集，添加test目录
+        if self._has_test_dataset:
+            directories.extend([
+                self.output_path / 'images' / 'test2017',
+                self.output_path / 'labels' / 'test2017',
+            ])
 
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
@@ -243,12 +290,12 @@ class GeoJSONToYOLOConverter:
 
         logger.info(f"Dataset split: {len(self._train_files)} train, {len(self._val_files)} val")
 
-    def _copy_images(self) -> Tuple[int, int]:
+    def _copy_images(self) -> Tuple[int, int, int]:
         """
         复制图像文件到输出目录，将.tif格式转换为.jpg
 
         Returns:
-            Tuple[int, int]: (训练集图像数量, 验证集图像数量)
+            Tuple[int, int, int]: (训练集图像数量, 验证集图像数量, 测试集图像数量)
         """
         source_images = self.source_path / 'images'
         if not source_images.exists():
@@ -257,6 +304,7 @@ class GeoJSONToYOLOConverter:
 
         train_count = 0
         val_count = 0
+        test_count = 0
         # 支持的图像格式
         image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
 
@@ -307,8 +355,44 @@ class GeoJSONToYOLOConverter:
                     shutil.copy2(src_file, dest_file)
                     val_count += 1
 
-        logger.debug(f"Copied/converted {train_count} train images, {val_count} val images")
-        return train_count, val_count
+        # 处理test数据集图像
+        if self._has_test_dataset:
+            test_images_dir = self.source_path / 'Test' / 'images'
+            if test_images_dir.exists():
+                # 获取test图像文件
+                test_image_files = [
+                    f for f in test_images_dir.rglob('*')
+                    if f.suffix.lower() in image_extensions
+                ]
+
+                # 创建文件名到文件对象的映射
+                test_image_map = {}
+                for img_file in test_image_files:
+                    name_without_ext = img_file.stem
+                    test_image_map[name_without_ext] = img_file
+
+                # 复制/转换test图像
+                for file_stem in self._test_files:
+                    if file_stem in test_image_map:
+                        src_file = test_image_map[file_stem]
+                        dest_dir = self.output_path / 'images' / 'test2017'
+
+                        # 如果是.tif格式，转换为.jpg
+                        if src_file.suffix.lower() in {'.tif', '.tiff'}:
+                            dest_file = dest_dir / (src_file.stem + '.jpg')
+                            if self._convert_tif_to_jpg(src_file, dest_file):
+                                test_count += 1
+                        else:
+                            # 其他格式直接复制
+                            dest_file = dest_dir / src_file.name
+                            shutil.copy2(src_file, dest_file)
+                            test_count += 1
+                    else:
+                        if self.verbose_logging:
+                            logger.debug(f"Test image not found: {file_stem}")
+
+        logger.debug(f"Copied/converted {train_count} train images, {val_count} val images, {test_count} test images")
+        return train_count, val_count, test_count
 
     def _convert_tif_to_jpg(self, src_file: Path, dest_file: Path) -> bool:
         """
@@ -404,12 +488,12 @@ class GeoJSONToYOLOConverter:
 
         return normalized
 
-    def _convert_labels(self) -> Tuple[int, int]:
+    def _convert_labels(self) -> Tuple[int, int, int]:
         """
         转换GeoJSON标注到YOLO TXT格式
 
         Returns:
-            Tuple[int, int]: (训练集标注数量, 验证集标注数量)
+            Tuple[int, int, int]: (训练集标注数量, 验证集标注数量, 测试集标注数量)
         """
         source_geojsons = self.source_path / 'geojsons'
         if not source_geojsons.exists():
@@ -417,6 +501,7 @@ class GeoJSONToYOLOConverter:
 
         train_count = 0
         val_count = 0
+        test_count = 0
 
         # 转换训练集标注
         for file_stem in self._train_files:
@@ -442,8 +527,22 @@ class GeoJSONToYOLOConverter:
                 except Exception as e:
                     logger.error(f"Unexpected error converting {geojson_file.name}: {e}")
 
-        logger.debug(f"Converted {train_count} train labels, {val_count} val labels")
-        return train_count, val_count
+        # 转换test数据集标注
+        if self._has_test_dataset:
+            test_geojsons = self.source_path / 'Test' / 'geojsons'
+            for file_stem in self._test_files:
+                geojson_file = test_geojsons / f'{file_stem}.geojson'
+                if geojson_file.exists():
+                    try:
+                        self._convert_single_geojson(geojson_file, split='test')
+                        test_count += 1
+                    except GeoJSONFormatError as e:
+                        logger.warning(f"Failed to convert test {geojson_file.name}: {e}")
+                    except Exception as e:
+                        logger.error(f"Unexpected error converting test {geojson_file.name}: {e}")
+
+        logger.debug(f"Converted {train_count} train labels, {val_count} val labels, {test_count} test labels")
+        return train_count, val_count, test_count
 
     def _convert_single_geojson(self, geojson_file: Path, split: str = 'train') -> None:
         """
@@ -500,7 +599,14 @@ class GeoJSONToYOLOConverter:
             logger.debug(f"Skipped {skipped_count} features in {geojson_file.name}")
 
         # 根据split选择输出目录
-        split_dir = 'train2017' if split == 'train' else 'val2017'
+        if split == 'train':
+            split_dir = 'train2017'
+        elif split == 'val':
+            split_dir = 'val2017'
+        elif split == 'test':
+            split_dir = 'test2017'
+        else:
+            split_dir = 'train2017'  # 默认值
         output_dir = self.output_path / 'labels' / split_dir
         output_file = output_dir / (geojson_file.stem + '.txt')
 
@@ -575,6 +681,9 @@ class GeoJSONToYOLOConverter:
             # train和val
             f.write("train: images/train2017\n")
             f.write("val: images/val2017\n")
+            # test（如果存在）
+            if self._has_test_dataset and self._test_files:
+                f.write("test: images/test2017\n")
 
         logger.debug(f"Generated data.yaml: {output_file}")
         return output_file
