@@ -372,6 +372,7 @@ class ResultMerger:
         self.low_threshold = segment_low_threshold
         self.cross_tile_bbox_iou_threshold = cross_tile_bbox_iou_threshold
         self.tile_processor = tile_processor
+        self.img_shape = None  # 存储影像尺寸用于边界过滤
 
     def merge(
         self,
@@ -404,6 +405,9 @@ class ResultMerger:
 
         logger.info(f"Merging {len(tile_results)} tile results for task: {self.task_type}")
 
+        # 存储影像尺寸用于边界过滤
+        self.img_shape = img_shape
+
         try:
             if self.task_type in ["detect", "obb"]:
                 return self._merge_detection(tile_results, img_shape, geotransform, crs)
@@ -417,6 +421,95 @@ class ResultMerger:
 
         except Exception as e:
             raise MergeError(f"Failed to merge results: {str(e)}") from e
+
+    def _filter_boundary_detections(self, boxes: np.ndarray) -> np.ndarray:
+        """
+        过滤掉超出图像边界的检测结果
+
+        由于边界切片进行了填充，可能会在填充区域产生误检。
+        此方法过滤掉超出原始图像边界的检测框。
+
+        Args:
+            boxes: [N, 6] 检测框数组 (x1, y1, x2, y2, conf, cls)
+
+        Returns:
+            过滤后的检测框数组
+        """
+        if self.img_shape is None or boxes is None or len(boxes) == 0:
+            return boxes
+
+        height, width = self.img_shape[:2]
+        filtered_boxes = []
+
+        for box in boxes:
+            x1, y1, x2, y2, conf, cls = box
+
+            # 计算检测框的中心点
+            center_x = (x1 + x2) / 2
+            center_y = (y1 + y2) / 2
+
+            # 检查中心点是否在图像边界内
+            if 0 <= center_x < width and 0 <= center_y < height:
+                # 裁剪超出边界的部分
+                x1_clipped = max(0, x1)
+                y1_clipped = max(0, y1)
+                x2_clipped = min(width - 1, x2)
+                y2_clipped = min(height - 1, y2)
+
+                # 确保裁剪后的框仍然有效
+                if x2_clipped > x1_clipped and y2_clipped > y1_clipped:
+                    filtered_boxes.append([x1_clipped, y1_clipped, x2_clipped, y2_clipped, conf, cls])
+
+        if filtered_boxes:
+            return np.array(filtered_boxes, dtype=boxes.dtype)
+        else:
+            return np.array([], dtype=boxes.dtype).reshape(0, 6)
+
+    def _filter_boundary_polygons(self, polygons: List[dict]) -> List[dict]:
+        """
+        过滤掉超出图像边界的多边形
+
+        由于边界切片进行了填充，可能会在填充区域产生误检。
+        此方法过滤掉主要部分超出原始图像边界的多边形。
+
+        Args:
+            polygons: 多边形信息列表，每个包含 'polygon', 'conf', 'cls' 等字段
+
+        Returns:
+            过滤后的多边形列表
+        """
+        if self.img_shape is None or not polygons:
+            return polygons
+
+        height, width = self.img_shape[:2]
+        filtered_polygons = []
+
+        for poly_info in polygons:
+            polygon = poly_info['polygon']
+
+            # 计算多边形的中心点
+            if len(polygon) > 0:
+                center_x = np.mean(polygon[:, 0])
+                center_y = np.mean(polygon[:, 1])
+
+                # 检查中心点是否在图像边界内
+                if 0 <= center_x < width and 0 <= center_y < height:
+                    # 裁剪超出边界的顶点
+                    clipped_polygon = []
+                    for point in polygon:
+                        x, y = float(point[0]), float(point[1])
+                        x_clipped = max(0, min(width - 1, x))
+                        y_clipped = max(0, min(height - 1, y))
+                        clipped_polygon.append([x_clipped, y_clipped])
+
+                    clipped_polygon = np.array(clipped_polygon, dtype=polygon.dtype)
+
+                    # 确保裁剪后的多边形仍然有效
+                    if len(clipped_polygon) >= 3:
+                        poly_info['polygon'] = clipped_polygon
+                        filtered_polygons.append(poly_info)
+
+        return filtered_polygons
 
     def _merge_detection(
         self,
@@ -455,6 +548,9 @@ class ResultMerger:
 
         # 合并所有检测框
         merged_boxes = np.vstack(all_boxes)
+
+        # 【边界过滤】过滤掉超出图像边界的检测结果
+        merged_boxes = self._filter_boundary_detections(merged_boxes)
 
         # 执行全局NMS
         final_boxes = self._global_nms(merged_boxes, self.iou_threshold)
@@ -873,6 +969,9 @@ class ResultMerger:
 
         # 执行矢量合并
         merged_polygons = self._merge_polygons_by_iou(all_polygons, output_dir)
+
+        # 【边界过滤】过滤掉超出图像边界的多边形
+        merged_polygons = self._filter_boundary_polygons(merged_polygons)
 
         # 简化多边形（减少顶点数，平滑边界）
         final_polygons = []

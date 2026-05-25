@@ -262,6 +262,10 @@ class TileProcessor:
                 # 读取切片
                 tile = image_array[row_start:row_end, col_start:col_end].copy()
 
+                # 【修复】边界切片填充到标准尺寸，避免坐标转换偏移
+                if tile.shape[0] < self.tile_size or tile.shape[1] < self.tile_size:
+                    tile = self._pad_tile_to_standard_size(tile, self.tile_size)
+
                 # 计算该分块的仿射变换参数
                 tile_geotransform = self._get_tile_geotransform(
                     geotransform, row_start, col_start
@@ -306,6 +310,38 @@ class TileProcessor:
         tile_ul_y = ul_y + row_offset * y_res
 
         return (tile_ul_x, x_res, x_rot, tile_ul_y, y_rot, y_res)
+
+    def _pad_tile_to_standard_size(self, tile: np.ndarray, target_size: int) -> np.ndarray:
+        """
+        将边界切片填充到标准尺寸
+
+        边缘切片的尺寸可能小于tile_size，这会导致YOLO模型的坐标转换出现偏移。
+        通过填充到标准尺寸，确保所有切片都在统一的坐标系下。
+
+        Args:
+            tile: 输入切片，可能是(H,W,C)或(H,W)形状
+            target_size: 目标尺寸（正方形边长）
+
+        Returns:
+            填充后的切片，形状为(target_size, target_size, C)或(target_size, target_size)
+        """
+        # 获取当前切片尺寸
+        if tile.ndim == 2:
+            h, w = tile.shape
+            channels = 1
+            # 创建填充后的数组
+            padded = np.zeros((target_size, target_size), dtype=tile.dtype)
+            # 复制原始数据
+            padded[:h, :w] = tile
+        else:
+            h, w, c = tile.shape
+            channels = c
+            # 创建填充后的数组
+            padded = np.zeros((target_size, target_size, channels), dtype=tile.dtype)
+            # 复制原始数据
+            padded[:h, :w, :] = tile
+
+        return padded
 
 
 class ImageTileGenerator:
