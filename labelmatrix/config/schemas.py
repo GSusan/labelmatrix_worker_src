@@ -36,7 +36,7 @@ class PredictConfig:
     iou_thres: float = 0.45
     augment: bool = False
     half: bool = True
-    save_format: str = 'geojson'
+    save_format: str = 'geojson'  # Options: geojson, shapefile, both, tiff, json
     tile_size: int = 512
     tile_overlap: float = 0.1
 

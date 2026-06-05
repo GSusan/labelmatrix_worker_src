@@ -13,7 +13,7 @@ class ConfigValidator:
     VALID_TASK_TYPES = ['detect', 'segment', 'classify', 'semantic_seg', 'obb']
     VALID_MODES = ['train', 'predict', 'resume']
     VALID_OPTIMIZERS = ['SGD', 'Adam', 'AdamW', 'RMSProp', 'auto']
-    VALID_FORMATS = ['geojson', 'tiff', 'json']
+    VALID_FORMATS = ['geojson', 'shapefile', 'both', 'tiff', 'json']
 
     def __init__(self):
         self.errors: List[str] = []

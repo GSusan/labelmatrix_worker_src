@@ -28,6 +28,7 @@ from ..handlers.rs_data_structures import TileResult, TileWithGeoRef, MergedResu
 from ..handlers.tile_processor import TileProcessor
 from ..handlers.result_merger import ResultMerger
 from ..handlers.geojson_exporter import GeoJSONExporter
+from ..handlers.shapefile_exporter import ShapefileExporter
 from ..handlers.pixel_result_exporter import PixelResultExporter
 from ..handlers.visualization_exporter import LargeImageVisualizer
 from ..exceptions.remote_sensing_errors import (
@@ -47,7 +48,7 @@ class RemoteSensingPredictor(BaseEngine):
     - 自动分块处理大幅面影像
     - 地理参考信息保持
     - NMS去重合并
-    - GeoJSON导出
+    - GeoJSON/Shapefile导出
     - 像素坐标结果导出（第一步识别结果）
     - 可视化成果导出（叠加检测结果）
     """
@@ -184,11 +185,11 @@ class RemoteSensingPredictor(BaseEngine):
                 output_dir=self.output_dir
             )
 
-            # 导出GeoJSON（最终大幅面矢量结果）
-            geojson_path = self._export_results(merged_result, image_path)
+            # 导出GeoJSON或Shapefile（最终大幅面矢量结果）
+            vector_path = self._export_results(merged_result, image_path)
 
             # 收集所有结果文件
-            result_files = [str(geojson_path)]
+            result_files = [str(vector_path)]
 
             # 添加像素坐标结果文件
             if pixel_result_path:
@@ -221,6 +222,9 @@ class RemoteSensingPredictor(BaseEngine):
             self._update_status('completed', progress=100)
             logger.info("Remote sensing prediction completed successfully")
 
+            # 获取保存格式用于metadata
+            save_format = self.predict_config.get('save_format', 'geojson').lower()
+
             return PredictResult(
                 success=True,
                 result_files=result_files,
@@ -230,7 +234,8 @@ class RemoteSensingPredictor(BaseEngine):
                     "img_shape": merged_result.img_shape,
                     "crs": merged_result.crs,
                     "pixel_results_path": str(pixel_result_path) if pixel_result_path else None,
-                    "geojson_path": str(geojson_path),
+                    "vector_path": str(vector_path),
+                    "vector_format": save_format,
                     "visualization_path": str(vis_path) if vis_path else None
                 }
             )
@@ -972,14 +977,14 @@ class RemoteSensingPredictor(BaseEngine):
         image_path: str
     ) -> Path:
         """
-        导出预测结果为GeoJSON（最终大幅面矢量结果）
+        导出预测结果为GeoJSON或Shapefile（最终大幅面矢量结果）
 
         Args:
             merged_result: 合并后的结果
             image_path: 原始影像路径
 
         Returns:
-            GeoJSON文件路径
+            输出文件路径
         """
         # 获取保存目录
         save_dir = self.predict_config.get('save_dir')
@@ -989,18 +994,59 @@ class RemoteSensingPredictor(BaseEngine):
             output_dir = self.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        exporter = GeoJSONExporter(
-            geotransform=self._geotransform,
-            crs=self._crs,
-            img_shape=self._img_shape
-        )
-
-        output_path = output_dir / f"{Path(image_path).stem}.geojson"
-
         # 从模型获取类别名称
         class_names = None
         if self.model is not None and hasattr(self.model, 'names'):
             class_names = self.model.names
+
+        # 获取保存格式
+        save_format = self.predict_config.get('save_format', 'geojson').lower()
+
+        # 根据格式选择导出器
+        if save_format == 'shapefile':
+            exporter = ShapefileExporter(
+                geotransform=self._geotransform,
+                crs=self._crs,
+                img_shape=self._img_shape
+            )
+            output_path = output_dir / f"{Path(image_path).stem}.shp"
+        elif save_format == 'both':
+            # Export both formats
+            geojson_exporter = GeoJSONExporter(
+                geotransform=self._geotransform,
+                crs=self._crs,
+                img_shape=self._img_shape
+            )
+            geojson_path = output_dir / f"{Path(image_path).stem}.geojson"
+            geojson_result = geojson_exporter.export(
+                merged_result=merged_result,
+                output_path=str(geojson_path),
+                class_names=class_names,
+                naming_config=self.file_naming
+            )
+
+            shapefile_exporter = ShapefileExporter(
+                geotransform=self._geotransform,
+                crs=self._crs,
+                img_shape=self._img_shape
+            )
+            shp_path = output_dir / f"{Path(image_path).stem}.shp"
+            shapefile_result = shapefile_exporter.export(
+                merged_result=merged_result,
+                output_path=str(shp_path),
+                class_names=class_names,
+                naming_config=self.file_naming
+            )
+
+            # Return GeoJSON path for compatibility (already exported above)
+            return geojson_result
+        else:  # default to geojson
+            exporter = GeoJSONExporter(
+                geotransform=self._geotransform,
+                crs=self._crs,
+                img_shape=self._img_shape
+            )
+            output_path = output_dir / f"{Path(image_path).stem}.geojson"
 
         return exporter.export(
             merged_result=merged_result,

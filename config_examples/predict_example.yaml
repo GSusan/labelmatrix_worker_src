@@ -49,7 +49,7 @@ predict:
   segment_low_threshold: 0.3              # 分割低IoU阈值（0.3-0.7检查连通性后决定）
 
   # 输出选项
-  save_format: "geojson"                  # 输出格式: geojson, json
+  save_format: "shapefile"                  # 输出格式: geojson, shapefile, both
   save_tiles: false                       # 是否保存分块可视化结果（调试用）
   save_pixel_results: false                # 是否保存第一步像素坐标结果（调试用）
   save_visualization: false                # 是否保存可视化成果（叠加检测结果的影像）

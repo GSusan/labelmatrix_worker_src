@@ -70,6 +70,38 @@ conda activate labelmatrix
 pip install ultralytics flask flask-cors pyyaml opencv-python scikit-image pillow shapely
 ```
 
+## 输出格式
+
+遥感推理模块支持多种矢量输出格式：
+
+- **GeoJSON** (默认): 基于JSON的格式，包含嵌入式CRS信息
+- **Shapefile**: ESRI Shapefile格式，包含多个组件文件 (.shp, .shx, .dbf, .prj, .cpg)
+
+### 配置输出格式
+
+在预测配置中设置输出格式：
+
+```yaml
+predict:
+  save_format: "shapefile"  # 选项: geojson, shapefile, both
+```
+
+### Shapefile 输出
+
+使用Shapefile格式时，会创建以下文件：
+- `{basename}.shp` - 几何数据
+- `{basename}.shx` - 索引文件
+- `{basename}.dbf` - 属性数据
+- `{basename}.prj` - 坐标系统
+- `{basename}.cpg` - 字符编码
+
+Shapefile保持与输入影像相同的CRS，并包含与GeoJSON输出相同的属性字段（针对Shapefile字段名限制进行了调整）。
+
+**注意:** Shapefile导出需要 `fiona` 库。安装命令：
+```bash
+pip install fiona
+```
+
 ## 快速开始
 
 ### 1. 准备配置文件
@@ -164,7 +196,7 @@ curl -X POST http://127.0.0.1:12345/stop
 | `iou_thres` | float | 0.45 | IoU阈值 |
 | `augment` | bool | False | 测试时增强 |
 | `half` | bool | True | 半精度推理 |
-| `save_format` | string | geojson | 结果格式 |
+| `save_format` | string | geojson | 结果格式 (geojson/shapefile/both) |
 | `tile_size` | int | 512 | 分块大小 |
 | `tile_overlap` | float | 0.1 | 分块重叠 |
 
