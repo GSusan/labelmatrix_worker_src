@@ -320,7 +320,7 @@ class RemoteSensingPredictor(BaseEngine):
 
     def _normalize_image(self, image: np.ndarray) -> np.ndarray:
         """
-        归一化影像到0-255
+        归一化影像到0-255（针对float32等数据类型优化）
 
         Args:
             image: 输入影像
@@ -328,7 +328,87 @@ class RemoteSensingPredictor(BaseEngine):
         Returns:
             归一化后的影像
         """
-        # 简单的线性拉伸
+        # 记录原始数据类型和范围信息
+        original_dtype = image.dtype
+        data_range = (image.min(), image.max())
+
+        logger.info(f"Normalizing image from {original_dtype}, range: {data_range}")
+
+        # 根据数据类型选择不同的归一化策略
+        if original_dtype == np.float32 or original_dtype == np.float64:
+            # 对于浮点数据，使用更精确的归一化
+            return self._normalize_float_image(image)
+        else:
+            # 对于整数类型，使用百分比拉伸
+            return self._normalize_integer_image(image)
+
+    def _normalize_float_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        专门处理float32/float64影像的归一化
+
+        Args:
+            image: 浮点型影像数据
+
+        Returns:
+            归一化到uint8的影像
+        """
+        # 检查是否为NaN或Inf
+        if np.any(np.isnan(image)) or np.any(np.isinf(image)):
+            logger.warning("Image contains NaN or Inf values, replacing with 0")
+            image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # 获取实际数据范围
+        img_min = np.min(image)
+        img_max = np.max(image)
+
+        # 如果数据范围很小（接近常数），避免除零
+        if img_max - img_min < 1e-6:
+            logger.warning(f"Image has very small range ({img_max - img_min:.6f}), using threshold normalization")
+            # 使用阈值方法
+            normalized = np.zeros_like(image, dtype=np.uint8)
+            # 将大于平均值+1标准差的设为255，其余为0
+            mean_val = np.mean(image)
+            std_val = np.std(image)
+            mask = image > (mean_val + std_val)
+            normalized[mask] = 255
+            return normalized
+
+        # 方法1：最小-最大归一化（保留全部动态范围）
+        min_max_normalized = (image - img_min) / (img_max - img_min)
+
+        # 方法2：百分比归一化（去除极端值）
+        p2 = np.percentile(image, 2)
+        p98 = np.percentile(image, 98)
+        percentile_normalized = (image - p2) / (p98 - p2 + 1e-7)
+
+        # 根据数据分布选择更好的方法
+        # 如果数据分布比较均匀，使用最小-最大
+        # 如果有极端值，使用百分比
+        range_ratio = (img_max - img_min) / (p98 - p2 + 1e-7)
+
+        if range_ratio > 2.0:  # 说明有极端值，使用百分比归一化
+            logger.info(f"Using percentile normalization (range ratio: {range_ratio:.2f})")
+            normalized = percentile_normalized
+        else:  # 数据分布相对均匀，使用最小-最大归一化
+            logger.info(f"Using min-max normalization (range ratio: {range_ratio:.2f})")
+            normalized = min_max_normalized
+
+        # 转换到uint8
+        normalized = np.clip(normalized * 255, 0, 255).astype(np.uint8)
+
+        return normalized
+
+    def _normalize_integer_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        处理整数类型影像的归一化
+
+        Args:
+            image: 整数型影像数据
+
+        Returns:
+            归一化到uint8的影像
+        """
+        # 对于整数类型，使用百分比拉伸
         img_min = np.percentile(image, 2)
         img_max = np.percentile(image, 98)
 
