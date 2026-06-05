@@ -58,11 +58,12 @@ class ShapefileExporter(BaseVectorExporter):
             raise ImportError("Fiona is required for Shapefile export. Install with: pip install fiona")
 
         output_path = Path(output_path)
+
+        # 确保输出目录存在（但不创建子文件夹）
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 生成文件名（不含扩展名）
-        filename = self._generate_filename(output_path.stem, naming_config)
-        final_path = output_path.parent / filename
+        # 直接使用传入的路径，不创建额外的子文件夹
+        final_path = output_path
 
         # 创建Fiona schema
         schema = self._create_schema()
