@@ -11,7 +11,7 @@ mode: "predict"                          # 运行模式: predict (推理), train
 # ============================================================
 # 模型配置
 # ============================================================
-model_path: "D:/DLProjects/ultralytics/labelmatrix/work_dirs/yolo_train_farmland_003/train/weights/best.pt"
+model_path: "D:/DLProjects/ultralytics/work_dirs/yolo_train_water_sat/train/weights/best.pt"
 # model_architecture 仅在需要创建新模型时使用，推理时使用 model_path 即可
 model_architecture: "yolov8n.pt"
 
@@ -30,7 +30,7 @@ predict:
   use_rs_predictor: true
 
   # 输入图像路径（支持单文件或目录）
-  source: "D:/DataSets/SatDatasets/lh_farmland/Shapefile/test1_05.tif"
+  source: "D:/DataSets/SmartMatrix/landcover_sat_river/N-34-106-A-c-1-3.tif"
 
   # 结果保存目录（可选，默认使用 output_dir）
   save_dir: "D:/DataSets/SatDatasets/lh_farmland/Shapefile/inference"
@@ -49,7 +49,7 @@ predict:
   segment_low_threshold: 0.3              # 分割低IoU阈值（0.3-0.7检查连通性后决定）
 
   # 输出选项
-  save_format: "shapefile"                  # 输出格式: geojson, shapefile, both
+  save_format: "both"                  # 输出格式: geojson, shapefile, both
   save_tiles: false                       # 是否保存分块可视化结果（调试用）
   save_pixel_results: false                # 是否保存第一步像素坐标结果（调试用）
   save_visualization: false                # 是否保存可视化成果（叠加检测结果的影像）

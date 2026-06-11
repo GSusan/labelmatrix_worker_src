@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Shapefile导出器（支持地理坐标）
+Shapefile导出器（使用GDAL/OGR，避免编码问题）
 """
 
 import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import numpy as np
-from shapely.geometry import Polygon as ShapelyPolygon
+
+try:
+    from osgeo import gdal, ogr, osr
+    GDAL_AVAILABLE = True
+except ImportError:
+    GDAL_AVAILABLE = False
 
 from .base_vector_exporter import BaseVectorExporter
 from .rs_data_structures import MergedResult
@@ -16,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class ShapefileExporter(BaseVectorExporter):
-    """Shapefile导出器（支持地理坐标）"""
+    """Shapefile导出器（使用GDAL/OGR，支持地理坐标）"""
 
     def __init__(
         self,
@@ -30,7 +35,62 @@ class ShapefileExporter(BaseVectorExporter):
             crs: 坐标系字符串
             img_shape: 影像尺寸 (height, width)
         """
+        if not GDAL_AVAILABLE:
+            raise ImportError("GDAL is required for Shapefile export. Install with: pip install gdal")
+
         super().__init__(geotransform, crs, img_shape)
+
+        # 关键改进：预先创建SRS对象，避免编码问题
+        self._srs = self._create_srs_object()
+
+        # 设置GDAL编码选项（支持中文）
+        gdal.SetConfigOption('SHAPE_ENCODING', 'UTF-8')
+        gdal.SetConfigOption('GDAL_FILENAME_IS_UTF8', 'YES')
+
+    def _create_srs_object(self) -> osr.SpatialReference:
+        """
+        从CRS字符串创建SRS对象
+        关键方法：处理所有编码问题，后续直接使用对象
+        """
+        srs = osr.SpatialReference()
+
+        try:
+            # 情况1：EPSG代码
+            if self.crs.startswith('EPSG:'):
+                epsg = int(self.crs.split(':')[1])
+                srs.ImportFromEPSG(epsg)
+                logger.info(f"Created SRS from EPSG:{epsg}")
+                return srs
+
+            # 情况2：Proj4字符串
+            if self.crs.startswith('+proj='):
+                srs.ImportFromProj4(self.crs)
+                logger.info("Created SRS from Proj4")
+                return srs
+
+            # 情况3：WKT字符串（可能有编码问题）
+            if 'PROJCS' in self.crs or 'GEOGCS' in self.crs:
+                # 使用SetFromUserInput，GDAL会自动处理编码
+                # 这是最宽容的方法，能处理各种编码的WKT
+                result = srs.SetFromUserInput(self.crs)
+                if result == 0:  # 成功
+                    logger.info("Created SRS from WKT using SetFromUserInput")
+                    return srs
+
+                # 回退到直接导入
+                srs.ImportFromWkt(self.crs)
+                logger.info("Created SRS from WKT using ImportFromWkt")
+                return srs
+
+            # 默认使用WGS84
+            logger.warning(f"Unrecognized CRS format: {self.crs[:50]}, using WGS84")
+            srs.ImportFromEPSG(4326)
+            return srs
+
+        except Exception as e:
+            logger.error(f"Failed to create SRS: {e}, using WGS84")
+            srs.ImportFromEPSG(4326)
+            return srs
 
     def export(
         self,
@@ -40,7 +100,7 @@ class ShapefileExporter(BaseVectorExporter):
         naming_config: str = "default"
     ) -> Path:
         """
-        导出Shapefile文件
+        导出Shapefile文件（使用GDAL/OGR）
 
         Args:
             merged_result: 合并后的结果
@@ -51,313 +111,314 @@ class ShapefileExporter(BaseVectorExporter):
         Returns:
             实际保存的文件路径（.shp文件路径）
         """
-        try:
-            import fiona
-            from fiona import crs as fiona_crs
-        except ImportError:
-            raise ImportError("Fiona is required for Shapefile export. Install with: pip install fiona")
-
         output_path = Path(output_path)
 
-        # 确保输出目录存在（但不创建子文件夹）
+        # 确保输出目录存在
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 直接使用传入的路径，不创建额外的子文件夹
-        final_path = output_path
+        # 创建Shapefile驱动
+        driver = ogr.GetDriverByName('ESRI Shapefile')
+        if driver is None:
+            raise RuntimeError("ESRI Shapefile driver not available")
 
-        # 创建Fiona schema
-        schema = self._create_schema()
+        # 删除已存在的文件
+        if output_path.exists():
+            driver.DeleteDataSource(str(output_path))
 
-        # 解析CRS for Fiona
-        fiona_crs_dict = self._parse_crs_for_fiona()
+        # 创建数据源
+        datasource = driver.CreateDataSource(str(output_path))
+        if datasource is None:
+            raise RuntimeError(f"Failed to create {output_path}")
 
-        # 收集所有features
-        features = []
+        try:
+            # 创建图层 - 关键：直接使用SRS对象，无编码问题
+            layer = datasource.CreateLayer(
+                str(output_path.stem),  # 图层名
+                srs=self._srs,          # 直接传递SRS对象
+                geom_type=ogr.wkbPolygon
+            )
 
-        # 根据任务类型导出
-        if merged_result.merged_boxes is not None:
-            # 导出检测框
-            features.extend(self._export_boxes_to_shapefile(
-                merged_result.merged_boxes,
-                merged_result.class_ids,
-                merged_result.confidences,
-                class_names
-            ))
+            if layer is None:
+                raise RuntimeError("Failed to create layer")
 
-        # 导出多边形（优先级：矢量多边形 > instance_id_map > merged_masks）
-        if merged_result.merged_polygons is not None and merged_result.class_ids is not None:
-            features.extend(self._export_polygons_to_shapefile(
-                merged_result.merged_polygons,
-                merged_result.class_ids,
-                merged_result.confidences,
-                class_names
-            ))
-        elif merged_result.instance_id_map is not None and merged_result.class_ids is not None:
-            # 从 instance_id_map 导出
-            features.extend(self._export_masks_from_instance_map(
-                merged_result.instance_id_map,
-                merged_result.class_ids,
-                merged_result.confidences,
-                class_names
-            ))
-        elif merged_result.merged_masks is not None:
-            features.extend(self._export_masks_to_shapefile(
-                merged_result.merged_masks,
-                merged_result.class_ids,
-                merged_result.confidences,
-                class_names
-            ))
+            # 创建属性字段
+            self._create_fields(layer)
 
-        # 写入Shapefile
-        # Check if features list is empty
-        if not features:
-            logger.warning("No features to export, creating empty Shapefile")
+            # 统计要素数量
+            feature_count = 0
 
-        logger.info(f"Writing {len(features)} features to Shapefile: {final_path}")
+            # 根据任务类型导出
+            if merged_result.merged_boxes is not None:
+                # 导出检测框
+                count = self._export_boxes_to_layer(
+                    layer,
+                    merged_result.merged_boxes,
+                    merged_result.class_ids,
+                    merged_result.confidences,
+                    class_names
+                )
+                feature_count += count
 
-        with fiona.open(
-            str(final_path),
-            'w',
-            driver='ESRI Shapefile',
-            crs=fiona_crs_dict,
-            schema=schema,
-            encoding='utf-8'
-        ) as dst:
-            for feature in features:
-                dst.write(feature)
+            # 导出多边形（优先级：矢量多边形 > instance_id_map > merged_masks）
+            if merged_result.merged_polygons is not None and merged_result.class_ids is not None:
+                count = self._export_polygons_to_layer(
+                    layer,
+                    merged_result.merged_polygons,
+                    merged_result.class_ids,
+                    merged_result.confidences,
+                    class_names
+                )
+                feature_count += count
+            elif merged_result.instance_id_map is not None and merged_result.class_ids is not None:
+                # 从 instance_id_map 导出
+                count = self._export_masks_from_instance_map(
+                    layer,
+                    merged_result.instance_id_map,
+                    merged_result.class_ids,
+                    merged_result.confidences,
+                    class_names
+                )
+                feature_count += count
+            elif merged_result.merged_masks is not None:
+                count = self._export_masks_to_layer(
+                    layer,
+                    merged_result.merged_masks,
+                    merged_result.class_ids,
+                    merged_result.confidences,
+                    class_names
+                )
+                feature_count += count
 
-        logger.info(f"Exported Shapefile to {final_path}.shp with {len(features)} features")
+            # 同步到磁盘
+            datasource.SyncToDisk()
 
-        return Path(f"{final_path}.shp")
+            logger.info(f"Exported {feature_count} features to {output_path}")
 
-    def _create_schema(self) -> Dict:
+        finally:
+            datasource = None  # 关闭数据源
+
+        return output_path
+
+    def _create_fields(self, layer):
         """
-        创建Fiona schema（定义字段类型）
+        创建属性字段
 
         Shapefile字段名限制：最多10个字符
-        Returns:
-            Fiona schema字典
         """
-        return {
-            'geometry': 'Polygon',  # 或 'MultiPolygon' 如果需要
-            'properties': {
-                'fid': 'int',           # Feature ID
-                'cls_id': 'int',        # Class ID (shortened for 10-char limit)
-                'cls_nm': 'str:254',    # Class name (shortened, limit to 254 characters)
-                'confid': 'float',      # Confidence (shortened)
-                'area_px': 'float'      # Area in pixels (shortened)
-            }
-        }
+        # 字段定义：使用字典格式更灵活
+        fields = [
+            {'name': 'fid', 'type': ogr.OFTInteger, 'width': 10, 'precision': 0},
+            {'name': 'cls_id', 'type': ogr.OFTInteger, 'width': 10, 'precision': 0},
+            {'name': 'cls_nm', 'type': ogr.OFTString, 'width': 254},
+            {'name': 'confid', 'type': ogr.OFTReal, 'width': 10, 'precision': 4},
+            {'name': 'area_px', 'type': ogr.OFTReal, 'width': 20, 'precision': 2}
+        ]
 
-    def _parse_crs_for_fiona(self) -> Dict:
+        for field_def in fields:
+            field = ogr.FieldDefn(field_def['name'], field_def['type'])
+            field.SetWidth(field_def['width'])
+            if 'precision' in field_def and field_def['precision'] > 0:
+                field.SetPrecision(field_def['precision'])
+            layer.CreateField(field)
+
+    def _create_polygon_geometry(self, polygon: np.ndarray) -> ogr.Geometry:
         """
-        解析CRS字符串为Fiona格式
+        从多边形顶点创建OGR多边形几何对象
+
+        Args:
+            polygon: [N, 2] 多边形顶点数组（像素坐标）
 
         Returns:
-            Fiona CRS字典
+            OGR多边形几何对象
         """
-        # 尝试解析EPSG代码
-        if self.crs.startswith('EPSG:'):
-            epsg_code = int(self.crs.split(':')[1])
-            return {"init": f"EPSG:{epsg_code}"}
-        else:
-            # 尝试使用WKT
-            try:
-                from fiona import crs as fiona_crs
-                return fiona_crs.from_string(self.crs)
-            except Exception:
-                logger.warning(f"Could not parse CRS '{self.crs}', using default")
-                return {"init": "EPSG:4326"}  # 默认WGS84
+        # 创建环
+        ring = ogr.Geometry(ogr.wkbLinearRing)
+
+        # 添加点（转换为地理坐标）
+        for point in polygon:
+            x, y = float(point[0]), float(point[1])
+            geo_x, geo_y = self.pixel_to_geo(x, y)
+            ring.AddPoint(geo_x, geo_y)
+
+        # 闭合环
+        ring.AddPoint(ring.GetX(0), ring.GetY(0))
+
+        # 创建多边形
+        poly = ogr.Geometry(ogr.wkbPolygon)
+        poly.AddGeometry(ring)
+
+        return poly
 
     def _validate_polygon(self, polygon: np.ndarray) -> bool:
         """
-        Validate polygon for Shapefile export
+        验证多边形有效性
 
         Args:
-            polygon: Polygon coordinates array
+            polygon: [N, 2] 多边形顶点数组
 
         Returns:
-            True if polygon is valid, False otherwise
+            True if valid, False otherwise
         """
         if polygon is None or len(polygon) < 3:
             return False
-        # Check if points are collinear (degenerate polygon)
+
+        # 检查点是否共线（退化多边形）
         if len(polygon) == 3:
-            # For triangles, check if points are collinear
             x1, y1 = polygon[0]
             x2, y2 = polygon[1]
             x3, y3 = polygon[2]
             area = abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1)) / 2
             return area > 1e-10
-        return True
-
-    def _validate_contour(self, contour: np.ndarray) -> bool:
-        """
-        Validate contour for Shapefile export
-
-        Args:
-            contour: [N, 2] contour points array
-
-        Returns:
-            True if valid, False otherwise
-        """
-        if contour is None or len(contour) < 3:
-            return False
-
-        # For triangles, check if points are collinear
-        if len(contour) == 3:
-            x1, y1 = contour[0]
-            x2, y2 = contour[1]
-            x3, y3 = contour[2]
-            area = abs((x2-x1)*(y3-y1) - (x3-x1)*(y2-y1)) / 2
-            return area > 1e-10
 
         return True
 
-    def _export_boxes_to_shapefile(
+    def _export_boxes_to_layer(
         self,
+        layer,
         boxes: np.ndarray,
         class_ids: np.ndarray,
         confidences: np.ndarray,
         class_names: Optional[List[str]] = None
-    ) -> List[Dict]:
+    ) -> int:
         """
-        导出检测框为Shapefile Features
+        导出检测框到图层
 
         Args:
+            layer: OGR图层对象
             boxes: [N, 6] (x1, y1, x2, y2, conf, cls)
             class_ids: [N] 类别ID
             confidences: [N] 置信度
             class_names: 类别名称列表
 
         Returns:
-            Feature列表（Fiona格式）
+            导出的要素数量
         """
-        features = []
+        count = 0
+        layer_defn = layer.GetLayerDefn()
 
         for i in range(len(boxes)):
             x1, y1, x2, y2 = boxes[i, :4]
 
-            # 转换为地理坐标
-            geo_coords = [
-                self.pixel_to_geo(x1, y1),
-                self.pixel_to_geo(x2, y1),
-                self.pixel_to_geo(x2, y2),
-                self.pixel_to_geo(x1, y2),
-                self.pixel_to_geo(x1, y1)
-            ]
+            # 创建矩形多边形
+            box_polygon = np.array([
+                [x1, y1],
+                [x2, y1],
+                [x2, y2],
+                [x1, y2]
+            ])
 
+            # 创建几何
+            geom = self._create_polygon_geometry(box_polygon)
+
+            # 创建要素
+            feature = ogr.Feature(layer_defn)
+            feature.SetGeometry(geom)
+
+            # 设置属性
             class_id = int(class_ids[i]) if i < len(class_ids) else 0
-            class_name = class_names[class_id] if class_names and class_id < len(class_names) else f"class_{class_id}"
+            class_name = (class_names[class_id] if class_names and
+                         class_id < len(class_names) else f"class_{class_id}")
             confidence = float(confidences[i]) if i < len(confidences) else 0.0
 
-            feature = {
-                'type': 'Feature',
-                'geometry': {
-                    'type': 'Polygon',
-                    'coordinates': [geo_coords]
-                },
-                'properties': {
-                    'fid': i + 1,
-                    'cls_id': class_id,
-                    'cls_nm': class_name,
-                    'confid': confidence,
-                    'area_px': float((x2 - x1) * (y2 - y1))
-                }
-            }
+            feature.SetField('fid', count + 1)
+            feature.SetField('cls_id', class_id)
+            feature.SetField('cls_nm', class_name)
+            feature.SetField('confid', confidence)
+            feature.SetField('area_px', float((x2 - x1) * (y2 - y1)))
 
-            features.append(feature)
+            # 创建要素
+            layer.CreateFeature(feature)
+            feature = None  # 释放
+            count += 1
 
-        return features
+        return count
 
-    def _export_polygons_to_shapefile(
+    def _export_polygons_to_layer(
         self,
+        layer,
         polygons: List[np.ndarray],
         class_ids: np.ndarray,
         confidences: np.ndarray,
         class_names: Optional[List[str]] = None
-    ) -> List[Dict]:
+    ) -> int:
         """
-        导出矢量多边形为Shapefile Features
+        导出矢量多边形到图层
 
         Args:
+            layer: OGR图层对象
             polygons: 多边形列表，每个是 [N, 2] 的顶点坐标数组（像素坐标）
             class_ids: [N] 类别ID
             confidences: [N] 置信度
             class_names: 类别名称列表
 
         Returns:
-            Feature列表（Fiona格式）
+            导出的要素数量
         """
-        features = []
+        count = 0
+        layer_defn = layer.GetLayerDefn()
 
         for i, polygon in enumerate(polygons):
             if not self._validate_polygon(polygon):
                 continue
 
-            # 转换为地理坐标
-            geo_coords = []
-            for point in polygon:
-                x, y = float(point[0]), float(point[1])
-                geo_x, geo_y = self.pixel_to_geo(x, y)
-                geo_coords.append([geo_x, geo_y])
+            # 创建几何
+            geom = self._create_polygon_geometry(polygon)
 
-            # 闭合多边形
-            if len(geo_coords) > 2:
-                geo_coords.append(geo_coords[0])
+            # 创建要素
+            feature = ogr.Feature(layer_defn)
+            feature.SetGeometry(geom)
 
+            # 设置属性
             class_id = int(class_ids[i]) if i < len(class_ids) else 0
-            class_name = class_names[class_id] if class_names and class_id < len(class_names) else f"class_{class_id}"
+            class_name = (class_names[class_id] if class_names and
+                         class_id < len(class_names) else f"class_{class_id}")
             confidence = float(confidences[i]) if i < len(confidences) else 0.0
 
             # 计算面积
             try:
-                poly = ShapelyPolygon(polygon)
-                area = float(poly.area)
+                from shapely.geometry import Polygon as ShapelyPolygon
+                area = float(ShapelyPolygon(polygon).area)
             except Exception:
                 area = 0.0
 
-            feature = {
-                'type': 'Feature',
-                'geometry': {
-                    'type': 'Polygon',
-                    'coordinates': [geo_coords]
-                },
-                'properties': {
-                    'fid': i + 1,
-                    'cls_id': class_id,
-                    'cls_nm': class_name,
-                    'confid': confidence,
-                    'area_px': area
-                }
-            }
+            feature.SetField('fid', i + 1)
+            feature.SetField('cls_id', class_id)
+            feature.SetField('cls_nm', class_name)
+            feature.SetField('confid', confidence)
+            feature.SetField('area_px', area)
 
-            features.append(feature)
+            # 创建要素
+            layer.CreateFeature(feature)
+            feature = None  # 释放
+            count += 1
 
-        return features
+        return count
 
-    def _export_masks_to_shapefile(
+    def _export_masks_to_layer(
         self,
+        layer,
         masks: np.ndarray,
         class_ids: np.ndarray,
         confidences: np.ndarray,
         class_names: Optional[List[str]] = None
-    ) -> List[Dict]:
+    ) -> int:
         """
-        导出掩膜为Shapefile Features
+        导出掩膜到图层
 
         Args:
+            layer: OGR图层对象
             masks: [N, H, W] 掩膜数组
             class_ids: [N] 类别ID
             confidences: [N] 置信度
             class_names: 类别名称列表
 
         Returns:
-            Feature列表（Fiona格式）
+            导出的要素数量
         """
         from skimage import measure
 
-        features = []
+        count = 0
+        layer_defn = layer.GetLayerDefn()
 
         for i in range(len(masks)):
             mask = masks[i]
@@ -371,69 +432,67 @@ class ShapefileExporter(BaseVectorExporter):
             # 选择最长的轮廓
             longest_contour = max(contours, key=len)
 
-            # Validate contour
-            if not self._validate_contour(longest_contour):
+            # 验证轮廓
+            if len(longest_contour) < 3:
                 continue
 
-            # 转换为地理坐标
-            geo_coords = []
-            for point in longest_contour:
-                y, x = point
-                geo_x, geo_y = self.pixel_to_geo(x, y)
-                geo_coords.append([geo_x, geo_y])
+            # 转换为多边形坐标数组
+            polygon = longest_contour[:, ::-1]  # [y, x] -> [x, y]
 
-            # 闭合多边形
-            if len(geo_coords) > 2:
-                geo_coords.append(geo_coords[0])
+            # 创建几何
+            geom = self._create_polygon_geometry(polygon)
 
+            # 创建要素
+            feature = ogr.Feature(layer_defn)
+            feature.SetGeometry(geom)
+
+            # 设置属性
             class_id = int(class_ids[i]) if i < len(class_ids) else 0
-            class_name = class_names[class_id] if class_names and class_id < len(class_names) else f"class_{class_id}"
+            class_name = (class_names[class_id] if class_names and
+                         class_id < len(class_names) else f"class_{class_id}")
             confidence = float(confidences[i]) if i < len(confidences) else 0.0
 
-            feature = {
-                'type': 'Feature',
-                'geometry': {
-                    'type': 'Polygon',
-                    'coordinates': [geo_coords]
-                },
-                'properties': {
-                    'fid': i + 1,
-                    'cls_id': class_id,
-                    'cls_nm': class_name,
-                    'confid': confidence,
-                    'area_px': float(np.sum(mask))
-                }
-            }
+            feature.SetField('fid', i + 1)
+            feature.SetField('cls_id', class_id)
+            feature.SetField('cls_nm', class_name)
+            feature.SetField('confid', confidence)
+            feature.SetField('area_px', float(np.sum(mask)))
 
-            features.append(feature)
+            # 创建要素
+            layer.CreateFeature(feature)
+            feature = None  # 释放
+            count += 1
 
-        return features
+        return count
 
     def _export_masks_from_instance_map(
         self,
+        layer,
         instance_id_map: np.ndarray,
         class_ids: np.ndarray,
         confidences: np.ndarray,
         class_names: Optional[List[str]] = None
-    ) -> List[Dict]:
+    ) -> int:
         """
-        从实例ID映射图导出掩膜为Shapefile Features
+        从实例ID映射图导出掩膜到图层
 
         Args:
+            layer: OGR图层对象
             instance_id_map: [H, W] 实例ID映射图
             class_ids: [N] 每个实例的类别ID
             confidences: [N] 每个实例的置信度
             class_names: 类别名称列表
 
         Returns:
-            Feature列表（Fiona格式）
+            导出的要素数量
         """
         from skimage import measure
 
         unique_ids = np.unique(instance_id_map)
         unique_ids = unique_ids[unique_ids > 0]  # 排除背景(0)
 
-        features = []
+        count = 0
+        layer_defn = layer.GetLayerDefn()
 
         for instance_id in unique_ids:
             idx = int(instance_id) - 1  # 转换为数组索引
@@ -450,8 +509,8 @@ class ShapefileExporter(BaseVectorExporter):
             # 选择最长的轮廓
             longest_contour = max(contours, key=len)
 
-            # Validate contour
-            if not self._validate_contour(longest_contour):
+            # 验证轮廓
+            if len(longest_contour) < 3:
                 continue
 
             # 简化轮廓（减少点数）
@@ -459,16 +518,15 @@ class ShapefileExporter(BaseVectorExporter):
                 from skimage.measure import approximate_polygon
                 longest_contour = approximate_polygon(longest_contour, tolerance=1.0)
 
-            # 转换为地理坐标
-            geo_coords = []
-            for point in longest_contour:
-                y, x = point
-                geo_x, geo_y = self.pixel_to_geo(x, y)
-                geo_coords.append([geo_x, geo_y])
+            # 转换为多边形坐标数组
+            polygon = longest_contour[:, ::-1]  # [y, x] -> [x, y]
 
-            # 闭合多边形
-            if len(geo_coords) > 2:
-                geo_coords.append(geo_coords[0])
+            # 创建几何
+            geom = self._create_polygon_geometry(polygon)
+
+            # 创建要素
+            feature = ogr.Feature(layer_defn)
+            feature.SetGeometry(geom)
 
             # 获取类别和置信度
             if idx < len(class_ids):
@@ -481,23 +539,18 @@ class ShapefileExporter(BaseVectorExporter):
             else:
                 confidence = 0.0
 
-            class_name = class_names[class_id] if class_names and class_id < len(class_names) else f"class_{class_id}"
+            class_name = (class_names[class_id] if class_names and
+                         class_id < len(class_names) else f"class_{class_id}")
 
-            feature = {
-                'type': 'Feature',
-                'geometry': {
-                    'type': 'Polygon',
-                    'coordinates': [geo_coords]
-                },
-                'properties': {
-                    'fid': int(instance_id),
-                    'cls_id': class_id,
-                    'cls_nm': class_name,
-                    'confid': confidence,
-                    'area_px': float(np.sum(mask))
-                }
-            }
+            feature.SetField('fid', int(instance_id))
+            feature.SetField('cls_id', class_id)
+            feature.SetField('cls_nm', class_name)
+            feature.SetField('confid', confidence)
+            feature.SetField('area_px', float(np.sum(mask)))
 
-            features.append(feature)
+            # 创建要素
+            layer.CreateFeature(feature)
+            feature = None  # 释放
+            count += 1
 
-        return features
+        return count
